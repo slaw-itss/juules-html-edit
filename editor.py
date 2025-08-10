@@ -86,11 +86,8 @@ class HtmlEditor(QMainWindow):
 
         # Widok wizualny (lewy panel)
         self.web_view = QWebEngineView()
-        self.web_page = QWebEnginePage(self.web_view)
-        # Ustawienie profilu, aby umożliwić edycję
-        self.web_page.setProfile(QWebEngineProfile.defaultProfile())
-        self.web_page.setContentEditable(True)
-        self.web_view.setPage(self.web_page)
+        self.web_page = self.web_view.page()  # Pobranie domyślnej strony, która już ma profil
+        self.web_page.setContentEditable(True) # Włączenie edycji
 
         # Edytor kodu (prawy panel)
         self.code_editor = QPlainTextEdit()
