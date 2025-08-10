@@ -86,8 +86,9 @@ class HtmlEditor(QMainWindow):
 
         # Widok wizualny (lewy panel)
         self.web_view = QWebEngineView()
-        self.web_page = self.web_view.page()  # Pobranie domyślnej strony, która już ma profil
-        self.web_page.setContentEditable(True) # Włączenie edycji
+        self.web_page = self.web_view.page()
+        # Edycję włączymy po załadowaniu strony, używając sygnału loadFinished.
+        self.web_page.loadFinished.connect(self.make_content_editable)
 
         # Edytor kodu (prawy panel)
         self.code_editor = QPlainTextEdit()
@@ -178,6 +179,12 @@ class HtmlEditor(QMainWindow):
             });
             """
         )
+
+    def make_content_editable(self, ok):
+        """Uruchamia edycję w widoku web po załadowaniu strony."""
+        if ok:
+            # Użycie designMode to standardowy sposób na włączenie edycji całego dokumentu.
+            self.web_page.runJavaScript("document.designMode = 'on';")
 
     # --- Funkcje obsługi plików ---
     def open_file(self):
