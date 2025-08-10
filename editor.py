@@ -160,9 +160,6 @@ class HtmlEditor(QMainWindow):
         # Synchronizacja: Zmiany w kodzie aktualizują widok wizualny
         self.code_editor.textChanged.connect(self.update_web_view_from_code)
 
-        # Synchronizacja: Zmiany w widoku wizualnym aktualizują kod po utracie fokusu
-        self.web_view.installEventFilter(self)
-
         # Synchronizacja: Kliknięcie w widoku wizualnym przenosi kursor w kodzie
         self.web_page.runJavaScript(
             """
@@ -184,6 +181,27 @@ class HtmlEditor(QMainWindow):
             self.web_page.runJavaScript("document.designMode = 'on';")
 
     # --- Funkcje obsługi plików ---
+    def _inject_base_tag(self, html_content, base_url_str):
+        """Wstrzykuje tag <base> do sekcji <head> dokumentu HTML."""
+        if not base_url_str:
+            return html_content
+
+        # Upewniamy się, że URL kończy się ukośnikiem
+        if not base_url_str.endswith('/'):
+            base_url_str += '/'
+
+        base_tag = f'<base href="{base_url_str}">'
+
+        # Znajdź pozycję <head> (ignorując wielkość liter)
+        head_pos = html_content.lower().find('<head>')
+        if head_pos != -1:
+            # Wstaw tag <base> zaraz po otwarciu <head>
+            insert_pos = head_pos + len('<head>')
+            return f"{html_content[:insert_pos]}\n{base_tag}\n{html_content[insert_pos:]}"
+        else:
+            # Jeśli nie ma <head>, utwórz go i wstaw na początku
+            return f"<head>\n{base_tag}\n</head>\n{html_content}"
+
     def open_file(self):
         """Otwiera plik HTML i ładuje jego zawartość."""
         path, _ = QFileDialog.getOpenFileName(self, "Otwórz plik HTML", "", "Pliki HTML (*.html *.htm)")
@@ -200,16 +218,10 @@ class HtmlEditor(QMainWindow):
                 dir_path = os.path.dirname(path)
                 base_url = QUrl.fromLocalFile(dir_path)
 
-                # Wstrzyknięcie tagu <base> do HTML, aby zapewnić poprawne ścieżki względne.
-                # Jest to bardziej niezawodne niż poleganie tylko na parametrze baseUrl.
-                # Upewniamy się, że ścieżka kończy się ukośnikiem.
-                base_href = base_url.toString()
-                if not base_href.endswith('/'):
-                    base_href += '/'
-                html_with_base = f'<base href="{base_href}">\n{content}'
+                # Wstrzykujemy tag <base> do podglądu, ale nie do edytora kodu
+                html_for_view = self._inject_base_tag(content, base_url.toString())
 
-                # Do podglądu ładujemy wersję z tagiem base, a do edytora czysty kod
-                self.web_page.setHtml(html_with_base, baseUrl=base_url)
+                self.web_page.setHtml(html_for_view, baseUrl=base_url)
                 self.code_editor.setPlainText(content)
                 self.statusBar().showMessage(f"Otworzono: {path}", 5000)
 
@@ -221,21 +233,30 @@ class HtmlEditor(QMainWindow):
 
 
     def save_file(self):
-        """Zapisuje bieżące zmiany do otwartego pliku."""
+        """Inicjuje proces zapisu bieżącego pliku."""
         if self.current_file_path is None:
-            # Jeśli plik nie był zapisany, działaj jak "Zapisz jako"
-            return self.save_file_as()
-
-        self._save_to_path(self.current_file_path)
-        return True
+            self.save_file_as()
+        else:
+            # Pobierz aktualny HTML i zapisz go w callbacku
+            self.web_page.toHtml(lambda html: self._complete_save(html, self.current_file_path))
 
     def save_file_as(self):
-        """Zapisuje bieżące zmiany do nowego pliku."""
+        """Inicjuje proces zapisu do nowego pliku."""
         path, _ = QFileDialog.getSaveFileName(self, "Zapisz plik jako", "", "Pliki HTML (*.html *.htm)")
         if path:
             self.current_file_path = path
-            return self._save_to_path(self.current_file_path)
-        return False
+            # Pobierz aktualny HTML i zapisz go w callbacku
+            self.web_page.toHtml(lambda html: self._complete_save(html, path))
+
+    def _complete_save(self, html, path):
+        """Kończy operację zapisu po otrzymaniu HTML z web view."""
+        # Najpierw zaktualizuj edytor kodu, który jest naszym źródłem prawdy
+        self._is_updating_code = True
+        self.code_editor.setPlainText(html)
+        self._is_updating_code = False
+
+        # Teraz zapisz zawartość z edytora kodu
+        self._save_to_path(path)
 
     def _save_to_path(self, path):
         """Wewnętrzna funkcja zapisująca kod do podanej ścieżki."""
@@ -257,37 +278,15 @@ class HtmlEditor(QMainWindow):
         self._is_updating_web = True
         current_html = self.code_editor.toPlainText()
 
-        final_html = current_html
+        html_for_view = current_html
         base_url = QUrl()
         if self.current_file_path:
             dir_path = os.path.dirname(self.current_file_path)
             base_url = QUrl.fromLocalFile(dir_path)
-            # Ponownie wstrzykujemy tag base, bo zawartość pochodzi z edytora kodu
-            base_href = base_url.toString()
-            if not base_href.endswith('/'):
-                base_href += '/'
-            final_html = f'<base href="{base_href}">\n{current_html}'
+            html_for_view = self._inject_base_tag(current_html, base_url.toString())
 
-        self.web_page.setHtml(final_html, baseUrl=base_url)
+        self.web_page.setHtml(html_for_view, baseUrl=base_url)
         self._is_updating_web = False
-
-    def update_code_from_web_view(self):
-        """Pobiera HTML z podglądu i aktualizuje edytor kodu, jeśli jest różnica."""
-        if self._is_updating_web:
-            return
-
-        def callback(html_from_web):
-            if not self._is_updating_web and html_from_web != self.code_editor.toPlainText():
-                self._is_updating_code = True
-                # Zachowaj pozycję kursora
-                cursor = self.code_editor.textCursor()
-                pos = cursor.position()
-                self.code_editor.setPlainText(html_from_web)
-                cursor.setPosition(pos)
-                self.code_editor.setTextCursor(cursor)
-                self._is_updating_code = False
-
-        self.web_page.toHtml(callback)
 
     def element_clicked(self, outer_html):
         """Slot wywoływany przez JS, gdy element w widoku web jest kliknięty."""
@@ -343,16 +342,6 @@ class HtmlEditor(QMainWindow):
         else:
             self.statusBar().clearMessage()
 
-
-    def eventFilter(self, obj, event):
-        """
-        Przechwytuje zdarzenia dla obserwowanych obiektów. Używane do wykrywania
-        utraty fokusu przez widok webowy w celu synchronizacji.
-        """
-        # Sprawdzamy, czy obiekt to web_view i czy zdarzenie to utrata fokusu
-        if obj is self.web_view and event.type() == QEvent.Type.FocusOut:
-            self.update_code_from_web_view()
-        return super().eventFilter(obj, event)
 
     def closeEvent(self, event):
         """Obsługa zamknięcia aplikacji."""
