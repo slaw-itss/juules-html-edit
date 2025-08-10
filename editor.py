@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit, QWidget, QHBoxLayout, QLineEdit, QPushButton, QLabel
 )
 from PyQt6.QtGui import QAction, QKeySequence, QTextCursor, QIcon
-from PyQt6.QtCore import Qt, QUrl, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QUrl, QTimer, pyqtSignal, QEvent
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage
 
@@ -160,11 +160,8 @@ class HtmlEditor(QMainWindow):
         # Synchronizacja: Zmiany w kodzie aktualizują widok wizualny
         self.code_editor.textChanged.connect(self.update_web_view_from_code)
 
-        # Synchronizacja: Zmiany w widoku wizualnym aktualizują kod
-        self.sync_timer = QTimer(self)
-        self.sync_timer.setInterval(500) # Sprawdzaj co 500ms
-        self.sync_timer.timeout.connect(self.update_code_from_web_view)
-        self.sync_timer.start()
+        # Synchronizacja: Zmiany w widoku wizualnym aktualizują kod po utracie fokusu
+        self.web_view.installEventFilter(self)
 
         # Synchronizacja: Kliknięcie w widoku wizualnym przenosi kursor w kodzie
         self.web_page.runJavaScript(
@@ -200,8 +197,19 @@ class HtmlEditor(QMainWindow):
                 self._is_updating_code = True
 
                 # Ustawienie base URL jest kluczowe dla ładowania CSS/JS
-                base_url = QUrl.fromLocalFile(os.path.dirname(path) + os.path.sep)
-                self.web_page.setHtml(content, baseUrl=base_url)
+                dir_path = os.path.dirname(path)
+                base_url = QUrl.fromLocalFile(dir_path)
+
+                # Wstrzyknięcie tagu <base> do HTML, aby zapewnić poprawne ścieżki względne.
+                # Jest to bardziej niezawodne niż poleganie tylko na parametrze baseUrl.
+                # Upewniamy się, że ścieżka kończy się ukośnikiem.
+                base_href = base_url.toString()
+                if not base_href.endswith('/'):
+                    base_href += '/'
+                html_with_base = f'<base href="{base_href}">\n{content}'
+
+                # Do podglądu ładujemy wersję z tagiem base, a do edytora czysty kod
+                self.web_page.setHtml(html_with_base, baseUrl=base_url)
                 self.code_editor.setPlainText(content)
                 self.statusBar().showMessage(f"Otworzono: {path}", 5000)
 
@@ -248,9 +256,19 @@ class HtmlEditor(QMainWindow):
 
         self._is_updating_web = True
         current_html = self.code_editor.toPlainText()
-        # Zachowujemy base URL przy aktualizacji
-        base_url = QUrl.fromLocalFile(os.path.dirname(self.current_file_path) + os.path.sep) if self.current_file_path else QUrl()
-        self.web_page.setHtml(current_html, baseUrl=base_url)
+
+        final_html = current_html
+        base_url = QUrl()
+        if self.current_file_path:
+            dir_path = os.path.dirname(self.current_file_path)
+            base_url = QUrl.fromLocalFile(dir_path)
+            # Ponownie wstrzykujemy tag base, bo zawartość pochodzi z edytora kodu
+            base_href = base_url.toString()
+            if not base_href.endswith('/'):
+                base_href += '/'
+            final_html = f'<base href="{base_href}">\n{current_html}'
+
+        self.web_page.setHtml(final_html, baseUrl=base_url)
         self._is_updating_web = False
 
     def update_code_from_web_view(self):
@@ -325,6 +343,16 @@ class HtmlEditor(QMainWindow):
         else:
             self.statusBar().clearMessage()
 
+
+    def eventFilter(self, obj, event):
+        """
+        Przechwytuje zdarzenia dla obserwowanych obiektów. Używane do wykrywania
+        utraty fokusu przez widok webowy w celu synchronizacji.
+        """
+        # Sprawdzamy, czy obiekt to web_view i czy zdarzenie to utrata fokusu
+        if obj is self.web_view and event.type() == QEvent.Type.FocusOut:
+            self.update_code_from_web_view()
+        return super().eventFilter(obj, event)
 
     def closeEvent(self, event):
         """Obsługa zamknięcia aplikacji."""
