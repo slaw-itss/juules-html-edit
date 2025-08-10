@@ -1,8 +1,10 @@
 import sys
 import os
+from bs4 import BeautifulSoup
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QFileDialog, QMessageBox, QSplitter,
-    QPlainTextEdit, QWidget, QHBoxLayout, QLineEdit, QPushButton, QLabel
+    QPlainTextEdit, QWidget, QHBoxLayout, QLineEdit, QPushButton, QLabel,
+    QInputDialog
 )
 from PyQt6.QtGui import QAction, QKeySequence, QTextCursor, QIcon
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal, QEvent, pyqtSlot
@@ -160,20 +162,99 @@ class HtmlEditor(QMainWindow):
         self.code_editor.textChanged.connect(self.update_web_view_from_code)
 
         # Synchronizacja: Kliknięcie w widoku wizualnym przenosi kursor w kodzie
-        # oraz implementacja mechanizmu synchronizacji kursora.
+        # Implementacja podświetlania i edycji wizualnej w okienku dialogowym
         self.web_page.runJavaScript(
             """
+            // Inicjalizacja mostu do Pythona
             new QWebChannel(qt.webChannelTransport, function(channel) {
                 window.py_bridge = channel.objects.bridge;
             });
 
-            document.addEventListener('click', (event) => {
-                if (window.py_bridge && event.target) {
-                    window.py_bridge.elementClicked(event.target.outerHTML);
+            // Dodanie stylów do podświetlania
+            const style = document.createElement('style');
+            style.innerHTML = `
+                .jules-highlight:hover {
+                    outline: 2px solid #0078d4 !important;
+                    cursor: pointer !important;
+                }
+            `;
+            document.head.appendChild(style);
+
+            let last_highlighted = null;
+
+            // Podświetlanie elementów przy najechaniu myszą
+            document.addEventListener('mouseover', (event) => {
+                // Podświetlamy tylko elementy, które mogą zawierać tekst
+                const tags_to_highlight = ['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'A', 'SPAN', 'B', 'I', 'STRONG', 'EM', 'TD', 'TH', 'BUTTON'];
+                if (event.target && tags_to_highlight.includes(event.target.tagName)) {
+                    if (last_highlighted) {
+                        last_highlighted.classList.remove('jules-highlight');
+                    }
+                    event.target.classList.add('jules-highlight');
+                    last_highlighted = event.target;
                 }
             });
+
+            // Wyłączanie podświetlenia po opuszczeniu elementu
+             document.addEventListener('mouseout', (event) => {
+                if (event.target && event.target === last_highlighted) {
+                    last_highlighted.classList.remove('jules-highlight');
+                    last_highlighted = null;
+                }
+            });
+
+
+            // Obsługa kliknięcia - wywołanie okna dialogowego w Pythonie
+            document.addEventListener('click', (event) => {
+                if (event.target && event.target.classList.contains('jules-highlight')) {
+                    // Zapobiegaj domyślnej akcji (np. przejściu do linku)
+                    event.preventDefault();
+                    event.stopPropagation();
+
+                    if (window.py_bridge) {
+                        // Wyślij HTML klikniętego elementu do Pythona
+                        window.py_bridge.open_visual_edit_dialog(event.target.outerHTML);
+                    }
+                }
+            }, true); // Użyj 'capture' aby przechwycić zdarzenie przed innymi listenerami
             """
         )
+
+    @pyqtSlot(str)
+    def open_visual_edit_dialog(self, element_html):
+        """Otwiera okno dialogowe do edycji tekstu klikniętego elementu."""
+        try:
+            # Użyj BeautifulSoup do sparsowania fragmentu HTML
+            soup = BeautifulSoup(element_html, 'html.parser')
+            element = soup.find() # Znajdź pierwszy (i jedyny) element
+
+            if not element:
+                return
+
+            # Pobierz obecny tekst
+            original_text = element.get_text()
+
+            # Otwórz okno dialogowe
+            new_text, ok = QInputDialog.getText(self, f"Edytuj element <{element.name}>",
+                                                "Treść:", QLineEdit.EchoMode.Normal,
+                                                original_text)
+
+            if ok and new_text != original_text:
+                # Zaktualizuj tekst w obiekcie BeautifulSoup
+                element.string = new_text
+                new_element_html = str(element)
+
+                # Zaktualizuj główny kod
+                current_code = self.code_editor.toPlainText()
+                new_code = current_code.replace(element_html, new_element_html, 1)
+
+                if new_code != current_code:
+                    self.code_editor.setPlainText(new_code)
+                    self.statusBar().showMessage("Element zaktualizowany.", 3000)
+
+        except Exception as e:
+            self.statusBar().showMessage(f"Błąd edycji wizualnej: {e}", 5000)
+
 
     # --- Funkcje obsługi plików ---
     def _inject_base_tag(self, html_content, base_url_str):
@@ -271,18 +352,6 @@ class HtmlEditor(QMainWindow):
 
         self.web_page.setHtml(html_for_view, baseUrl=base_url)
         self._is_updating_web = False
-
-    def element_clicked(self, outer_html):
-        """Slot wywoływany przez JS, gdy element w widoku web jest kliknięty."""
-        # Upraszczamy, biorąc pierwsze 100 znaków, aby uniknąć problemów z dużymi elementami
-        search_text = outer_html.strip()
-        if len(search_text) > 100:
-            search_text = search_text[:100]
-
-        cursor = self.code_editor.document().find(search_text)
-        if not cursor.isNull():
-            self.code_editor.setTextCursor(cursor)
-            self.code_editor.setFocus()
 
     def toggle_dual_view(self, checked):
         """Pokazuje lub ukrywa panel edytora kodu."""
