@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit, QWidget, QHBoxLayout, QLineEdit, QPushButton, QLabel
 )
 from PyQt6.QtGui import QAction, QKeySequence, QTextCursor, QIcon
-from PyQt6.QtCore import Qt, QUrl, QTimer, pyqtSignal, QEvent
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal, QEvent, pyqtSlot
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage
 
@@ -69,6 +69,7 @@ class HtmlEditor(QMainWindow):
         self._is_updating_code = False
         self._is_updating_web = False
         self.find_dialog = None
+        self.active_element_html = None # Do przechowywania HTML edytowanego elementu
 
         # Inicjalizacja UI
         self._setup_ui()
@@ -161,16 +162,36 @@ class HtmlEditor(QMainWindow):
         self.code_editor.textChanged.connect(self.update_web_view_from_code)
 
         # Synchronizacja: Kliknięcie w widoku wizualnym przenosi kursor w kodzie
+        # oraz implementacja mechanizmu "patchowania" zmian z edytora wizualnego.
         self.web_page.runJavaScript(
             """
+            // Upewnij się, że kanał komunikacyjny jest zainicjowany
+            new QWebChannel(qt.webChannelTransport, function(channel) {
+                window.py_bridge = channel.objects.bridge;
+            });
+
+            // Synchronizacja kursora po kliknięciu
             document.addEventListener('click', (event) => {
-                let py_channel = new QWebChannel(qt.webChannelTransport, function(channel) {
-                    window.py_bridge = channel.objects.bridge;
-                });
-                if (window.py_bridge) {
+                if (window.py_bridge && event.target) {
                     window.py_bridge.elementClicked(event.target.outerHTML);
                 }
             });
+
+            // Zapisz stan elementu PRZED edycją
+            document.addEventListener('focusin', (event) => {
+                if (window.py_bridge && event.target && typeof event.target.outerHTML === 'string') {
+                    // Wywołaj slot w Pythonie, aby zapisać oryginalny HTML
+                    window.py_bridge.store_original_element(event.target.outerHTML);
+                }
+            });
+
+            // Zastosuj zmianę PO zakończeniu edycji (utrata fokusu)
+            document.addEventListener('blur', (event) => {
+                if (window.py_bridge && event.target && typeof event.target.outerHTML === 'string') {
+                    // Wywołaj slot w Pythonie, aby zastosować "łatkę" z nowym HTML
+                    window.py_bridge.apply_visual_edit(event.target.outerHTML);
+                }
+            }, true); // Użyj fazy 'capture', aby mieć pewność przechwycenia zdarzenia
             """
         )
 
@@ -179,6 +200,27 @@ class HtmlEditor(QMainWindow):
         if ok:
             # Użycie designMode to standardowy sposób na włączenie edycji całego dokumentu.
             self.web_page.runJavaScript("document.designMode = 'on';")
+
+    @pyqtSlot(str)
+    def store_original_element(self, html):
+        """Zapisuje w pamięci HTML elementu, który jest właśnie edytowany."""
+        self.active_element_html = html
+
+    @pyqtSlot(str)
+    def apply_visual_edit(self, new_html):
+        """Zastępuje stary HTML elementu nową wersją w edytorze kodu."""
+        if self.active_element_html and self.active_element_html != new_html:
+            current_code = self.code_editor.toPlainText()
+            # Używamy replace z count=1, aby podmienić tylko pierwsze wystąpienie
+            new_code = current_code.replace(self.active_element_html, new_html, 1)
+
+            if new_code != current_code:
+                self._is_updating_web = True # Zapobiegaj odświeżeniu podglądu
+                self.code_editor.setPlainText(new_code)
+                self._is_updating_web = False
+
+        # Resetujemy zapamiętany HTML, aby przygotować się na kolejną edycję
+        self.active_element_html = None
 
     # --- Funkcje obsługi plików ---
     def _inject_base_tag(self, html_content, base_url_str):
@@ -233,30 +275,19 @@ class HtmlEditor(QMainWindow):
 
 
     def save_file(self):
-        """Inicjuje proces zapisu bieżącego pliku."""
+        """Zapisuje bieżące zmiany do otwartego pliku."""
         if self.current_file_path is None:
+            # Jeśli plik nie był zapisany, działaj jak "Zapisz jako"
             self.save_file_as()
         else:
-            # Pobierz aktualny HTML i zapisz go w callbacku
-            self.web_page.toHtml(lambda html: self._complete_save(html, self.current_file_path))
+            self._save_to_path(self.current_file_path)
 
     def save_file_as(self):
-        """Inicjuje proces zapisu do nowego pliku."""
+        """Zapisuje bieżące zmiany do nowego pliku."""
         path, _ = QFileDialog.getSaveFileName(self, "Zapisz plik jako", "", "Pliki HTML (*.html *.htm)")
         if path:
             self.current_file_path = path
-            # Pobierz aktualny HTML i zapisz go w callbacku
-            self.web_page.toHtml(lambda html: self._complete_save(html, path))
-
-    def _complete_save(self, html, path):
-        """Kończy operację zapisu po otrzymaniu HTML z web view."""
-        # Najpierw zaktualizuj edytor kodu, który jest naszym źródłem prawdy
-        self._is_updating_code = True
-        self.code_editor.setPlainText(html)
-        self._is_updating_code = False
-
-        # Teraz zapisz zawartość z edytora kodu
-        self._save_to_path(path)
+            self._save_to_path(path)
 
     def _save_to_path(self, path):
         """Wewnętrzna funkcja zapisująca kod do podanej ścieżki."""
