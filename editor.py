@@ -69,7 +69,6 @@ class HtmlEditor(QMainWindow):
         self._is_updating_code = False
         self._is_updating_web = False
         self.find_dialog = None
-        self.active_element_html = None # Do przechowywania HTML edytowanego elementu
 
         # Inicjalizacja UI
         self._setup_ui()
@@ -88,8 +87,7 @@ class HtmlEditor(QMainWindow):
         # Widok wizualny (lewy panel)
         self.web_view = QWebEngineView()
         self.web_page = self.web_view.page()
-        # Edycję włączymy po załadowaniu strony, używając sygnału loadFinished.
-        self.web_page.loadFinished.connect(self.make_content_editable)
+        # Web view jest teraz tylko do podglądu, więc nie włączamy edycji.
 
         # Edytor kodu (prawy panel)
         self.code_editor = QPlainTextEdit()
@@ -162,65 +160,20 @@ class HtmlEditor(QMainWindow):
         self.code_editor.textChanged.connect(self.update_web_view_from_code)
 
         # Synchronizacja: Kliknięcie w widoku wizualnym przenosi kursor w kodzie
-        # oraz implementacja mechanizmu "patchowania" zmian z edytora wizualnego.
+        # oraz implementacja mechanizmu synchronizacji kursora.
         self.web_page.runJavaScript(
             """
-            // Upewnij się, że kanał komunikacyjny jest zainicjowany
             new QWebChannel(qt.webChannelTransport, function(channel) {
                 window.py_bridge = channel.objects.bridge;
             });
 
-            // Synchronizacja kursora po kliknięciu
             document.addEventListener('click', (event) => {
                 if (window.py_bridge && event.target) {
                     window.py_bridge.elementClicked(event.target.outerHTML);
                 }
             });
-
-            // Zapisz stan elementu PRZED edycją
-            document.addEventListener('focusin', (event) => {
-                if (window.py_bridge && event.target && typeof event.target.outerHTML === 'string') {
-                    // Wywołaj slot w Pythonie, aby zapisać oryginalny HTML
-                    window.py_bridge.store_original_element(event.target.outerHTML);
-                }
-            });
-
-            // Zastosuj zmianę PO zakończeniu edycji (utrata fokusu)
-            document.addEventListener('blur', (event) => {
-                if (window.py_bridge && event.target && typeof event.target.outerHTML === 'string') {
-                    // Wywołaj slot w Pythonie, aby zastosować "łatkę" z nowym HTML
-                    window.py_bridge.apply_visual_edit(event.target.outerHTML);
-                }
-            }, true); // Użyj fazy 'capture', aby mieć pewność przechwycenia zdarzenia
             """
         )
-
-    def make_content_editable(self, ok):
-        """Uruchamia edycję w widoku web po załadowaniu strony."""
-        if ok:
-            # Użycie designMode to standardowy sposób na włączenie edycji całego dokumentu.
-            self.web_page.runJavaScript("document.designMode = 'on';")
-
-    @pyqtSlot(str)
-    def store_original_element(self, html):
-        """Zapisuje w pamięci HTML elementu, który jest właśnie edytowany."""
-        self.active_element_html = html
-
-    @pyqtSlot(str)
-    def apply_visual_edit(self, new_html):
-        """Zastępuje stary HTML elementu nową wersją w edytorze kodu."""
-        if self.active_element_html and self.active_element_html != new_html:
-            current_code = self.code_editor.toPlainText()
-            # Używamy replace z count=1, aby podmienić tylko pierwsze wystąpienie
-            new_code = current_code.replace(self.active_element_html, new_html, 1)
-
-            if new_code != current_code:
-                self._is_updating_web = True # Zapobiegaj odświeżeniu podglądu
-                self.code_editor.setPlainText(new_code)
-                self._is_updating_web = False
-
-        # Resetujemy zapamiętany HTML, aby przygotować się na kolejną edycję
-        self.active_element_html = None
 
     # --- Funkcje obsługi plików ---
     def _inject_base_tag(self, html_content, base_url_str):
